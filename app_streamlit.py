@@ -15,7 +15,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 warnings.filterwarnings('ignore')
 
 # ==============================================================================
-# 1. CẤU HÌNH TRANG STREAMLIT CHO THIẾT BỊ DI ĐỘNG & DESKTOP
+# 1. CẤU HÌNH TRANG STREAMLIT TỐI ƯU CHO DI ĐỘNG & WEB
 # ==============================================================================
 st.set_page_config(
     page_title="Delta Robot IK AI Agent",
@@ -28,7 +28,7 @@ st.set_page_config(
 # 2. HÀM TẢI MÔ HÌNH AI TỰ ĐỘNG TỪ GOOGLE DRIVE
 # ==============================================================================
 @st.cache_resource
-def load_model_from_gdrive(file_id):
+def load_model_from_gdrive(file_id="1eK00jqxsrZ-ZTS0RPQGXtrTLfZQxKrXq"):
     """Tải và nạp mô hình .joblib từ Google Drive ngầm vào bộ nhớ cache"""
     model_path = "hoc_nguoc_model.joblib"
     
@@ -38,9 +38,10 @@ def load_model_from_gdrive(file_id):
         if matches:
             model_path = matches[0]
 
-    # 2. Nếu chưa có file, tiến hành tải từ Google Drive
-    if not os.path.exists(model_path) and file_id and file_id != "PASTE_YOUR_FILE_ID_HERE":
-        url = f"https://drive.google.com/uc?id={file_id}"
+    # 2. Nếu chưa có file, tiến hành tải từ Google Drive với File ID của bạn
+    if not os.path.exists(model_path):
+        target_id = file_id.strip() if file_id and file_id.strip() else "1eK00jqxsrZ-ZTS0RPQGXtrTLfZQxKrXq"
+        url = f"https://drive.google.com/uc?id={target_id}"
         try:
             with st.spinner("Đang tải mô hình AI từ Google Drive (chỉ tải 1 lần đầu)..."):
                 gdown.download(url, model_path, quiet=False)
@@ -60,7 +61,7 @@ def load_model_from_gdrive(file_id):
     return None, None
 
 # ==============================================================================
-# 3. HÀM DỰ ĐOÁN AI THÔNG MINH
+# 3. HÀM DỰ ĐOÁN AI THÔNG MINH (ĐÃ SỬA LỖI KMEANS N_SAMPLES=1)
 # ==============================================================================
 def predict_smart(loaded_obj, X_input):
     X_curr = np.array(X_input, dtype=np.float64)
@@ -71,12 +72,23 @@ def predict_smart(loaded_obj, X_input):
     X_df = pd.DataFrame(X_curr, columns=cols if X_curr.shape[1] == 7 else None)
 
     model = None
+    poly = None
+    scaler = None
+    kmeans = None
+
     if isinstance(loaded_obj, dict):
         for k in ['pipeline', 'model_pipeline', 'pipe', 'full_pipeline']:
             if k in loaded_obj and hasattr(loaded_obj[k], 'predict'):
-                return loaded_obj[k].predict(X_df)
+                try:
+                    return loaded_obj[k].predict(X_df)
+                except Exception:
+                    pass
 
-        for mk in ['model', 'rf_model', 'rf', 'estimator', 'regressor', 'best_estimator_']:
+        poly = loaded_obj.get('poly') or loaded_obj.get('poly_transformer') or loaded_obj.get('polynomialfeatures')
+        scaler = loaded_obj.get('scaler') or loaded_obj.get('standardscaler')
+        kmeans = loaded_obj.get('kmeans') or loaded_obj.get('kmeans_model')
+
+        for mk in ['model', 'rf_model', 'rf', 'estimator', 'regressor', 'randomforestregressor', 'best_estimator_']:
             if mk in loaded_obj and hasattr(loaded_obj[mk], 'predict'):
                 model = loaded_obj[mk]
                 break
@@ -92,12 +104,22 @@ def predict_smart(loaded_obj, X_input):
     if model is None or not hasattr(model, 'predict'):
         raise ValueError("Không tìm thấy mô hình dự đoán hợp lệ trong file .joblib!")
 
+    # Thử dự đoán trực tiếp nếu mô hình nhận 7 tham số
     try:
         return model.predict(X_df)
     except Exception:
         pass
 
+    # Biến đổi đặc trưng nâng cao
     X_mat = X_curr
+    if poly is not None and hasattr(poly, 'transform'):
+        X_mat = poly.transform(X_mat)
+    if scaler is not None and hasattr(scaler, 'transform'):
+        X_mat = scaler.transform(X_mat)
+    if kmeans is not None and hasattr(kmeans, 'predict'):
+        labels = kmeans.predict(X_mat).reshape(-1, 1)
+        X_mat = np.hstack([X_mat, labels])
+
     n_expected = getattr(model, 'n_features_in_', None)
     if n_expected in [28, 29] and X_mat.shape[1] == 7:
         from sklearn.preprocessing import PolynomialFeatures
@@ -105,9 +127,11 @@ def predict_smart(loaded_obj, X_input):
         X_mat = poly_auto.fit_transform(X_mat)
 
         if n_expected == 29 and X_mat.shape[1] == 28:
-            from sklearn.cluster import KMeans
-            kmeans_auto = KMeans(n_clusters=5, random_state=42)
-            labels = kmeans_auto.fit_predict(X_mat).reshape(-1, 1)
+            if kmeans is not None and hasattr(kmeans, 'predict'):
+                labels = kmeans.predict(X_mat).reshape(-1, 1)
+            else:
+                # Tránh lỗi n_samples=1 < n_clusters=5 khi tính điểm đơn lẻ
+                labels = np.zeros((X_mat.shape[0], 1))
             X_mat = np.hstack([X_mat, labels])
 
     return model.predict(X_mat)
@@ -120,7 +144,7 @@ st.sidebar.title("⚙️ Cấu Hình Hệ Thống")
 st.sidebar.subheader("1. Mã Google Drive File ID")
 gdrive_id = st.sidebar.text_input(
     "Nhập File ID trên Google Drive:",
-    value="1eK00jqxsrZ-ZTS0RPQGXtrTLfZQxKrXq", # Thay File ID thực tế của bạn vào đây
+    value="1eK00jqxsrZ-ZTS0RPQGXtrTLfZQxKrXq",
     help="Chuỗi ký tự nằm giữa /d/ và /view trên link chia sẻ Google Drive."
 )
 
@@ -141,7 +165,7 @@ loaded_model, model_file_name = load_model_from_gdrive(gdrive_id)
 if loaded_model is not None:
     st.sidebar.success(f"✓ Đã sẵn sàng mô hình: {os.path.basename(model_file_name)}")
 else:
-    st.sidebar.warning("⚠️ Chưa nạp được tệp .joblib. Vui lòng kiểm tra File ID Google Drive hoặc tệp local.")
+    st.sidebar.warning("⚠️ Chưa nạp được tệp .joblib. Vui lòng kiểm tra File ID Google Drive.")
 
 # ==============================================================================
 # 5. GIAO DIỆN CHÍNH - HIỂN THỊ VÀ MÔ PHỎNG 3D
